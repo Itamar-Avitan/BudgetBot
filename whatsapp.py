@@ -72,22 +72,12 @@ def get_gpt():
             print("Initializing GPT API with gpt-4.1-mini...")
             gpt = GPT_API(api_key=GPT_API_KEY, model="gpt-4.1-mini")
             test_response = gpt._call_chat([{"role": "user", "content": "Hello"}], temp=0, max_t=25)
-            print("GPT-4.1-mini fallback successful!")
+            print("GPT-4.1-mini initialization successful!")
         except Exception as e:
             print(f"ERROR: GPT-4.1-mini initialization failed: {e}")
             print(f"API Key length: {len(GPT_API_KEY) if GPT_API_KEY else 'None'}")
             print(f"API Key prefix: {GPT_API_KEY[:10] if GPT_API_KEY else 'None'}...")
-            # Try fallback to gpt-4.1-mini
-            try:    
-                # Start with gpt-4o-mini as it's more reliable in cloud environments
-                print("Initializing GPT API with gpt-4o-mini as fallback...")
-                gpt = GPT_API(api_key=GPT_API_KEY, model="gpt-4o-mini")
-                # Test the connection with a simple call
-                test_response = gpt._call_chat([{"role": "user", "content": "Hello"}], temp=0, max_t=25)
-                print("GPT-4o-mini initialization successful!")               
-            except Exception as e2:
-                print(f"ERROR: All models failed: {e2}")
-                gpt = None
+            gpt = None
     return gpt
 
 # ---------------------------------------------------------------------------
