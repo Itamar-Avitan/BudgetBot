@@ -1,0 +1,36 @@
+runtime: python39
+
+# Always-on configuration to prevent cold starts
+automatic_scaling:
+  min_instances: 1
+  max_instances: 10
+  target_cpu_utilization: 0.6
+
+# Environment variables for the application
+env_variables:
+  # Flask configuration
+  FLASK_ENV: production
+
+# Health check configuration
+readiness_check:
+  path: "/"
+  check_interval_sec: 5
+  timeout_sec: 4
+  failure_threshold: 2
+  success_threshold: 2
+
+liveness_check:
+  path: "/"
+  check_interval_sec: 30
+  timeout_sec: 4
+  failure_threshold: 2
+  success_threshold: 2
+
+# Resource limits (optimized for cost)
+resources:
+  cpu: 0.5
+  memory_gb: 0.5
+  disk_size_gb: 5
+
+# Timeout configuration for webhooks - using full version
+entrypoint: gunicorn -b :$PORT whatsapp:app --timeout 60 --workers 2 

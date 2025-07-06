@@ -1,0 +1,36 @@
+{
+    "_comment_general": "This is an example credentials file. Replace all values with your actual credentials.",
+    
+    "GPT_API_KEY": "sk-proj-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+    "_comment_gpt": "Your OpenAI API key from https://platform.openai.com/api-keys",
+    
+    "META_ACCESS_TOKEN": "EAAXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+    "_comment_meta_token": "Your Meta WhatsApp Business API access token from Meta Developer Console",
+    
+    "META_PHONE_NUMBER_ID": "123456789012345",
+    "_comment_phone_id": "Your WhatsApp Business phone number ID from Meta Business Manager",
+    
+    "META_WHATSAPP_ACCOUNT_ID": "123456789012345",
+    "_comment_whatsapp_account": "Your WhatsApp Business account ID from Meta Business Manager",
+    
+    "META_PHONE_NUMBER": "+15551234567",
+    "_comment_phone_display": "Your WhatsApp Business phone number (display format with + prefix)",
+    
+    "META_APP_ID": "123456789012345",
+    "_comment_app_id": "Your Meta app ID from Meta Developer Console",
+    
+    "META_WEBHOOK_VERIFY_TOKEN": "your_webhook_verify_token_here",
+    "_comment_webhook": "Your custom webhook verification token (you set this yourself)",
+    
+    "IO_SPREADSHEET_ID": "1AbCdEfGhIjKlMnOpQrStUvWxYz123456789",
+    "_comment_io_sheet": "Google Sheets ID for transaction input/output (from the URL of your Google Sheet)",
+    
+    "SUMMARY_SPREADSHEET_ID": "1XyZwVuTsRqPoNmLkJiHgFeDcBa987654321",
+    "_comment_summary_sheet": "Google Sheets ID for summary/reports (from the URL of your Google Sheet)",
+    
+    "_comment_users": "User configuration - Phone numbers in Meta format (without + prefix) for proper user recognition",
+    "USER1_PHONE": "1234567890",
+    "USER1_NAME": "John Doe",
+    "USER2_PHONE": "0987654321", 
+    "USER2_NAME": "Jane Smith"
+}
