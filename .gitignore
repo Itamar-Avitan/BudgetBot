@@ -1,7 +1,6 @@
 # Personal directories that shouldn't be committed
 Desktop/
 
-
 # Python
 __pycache__/
 *.py[cod]
@@ -59,43 +58,12 @@ logs/
 *.temp
 .cache/
 
-# Google Cloud
-.gcloudignore
+# Google Cloud SDK
 google-cloud-sdk/
 
-#personal files
-credits/google_creds.json
-credits/keys.json
-Desktop/
-__pycache__
-.venv
-
-# Sensitive credential files
+# PERSONAL FILES (Keep private)
 credits/keys.json
 credits/google_creds.json
+/deploy_config.json
 
-# Python cache files
-__pycache__/
-*.py[cod]
-*$py.class
-
-# Virtual environment
-venv/
-env/
-.venv/
-
-# IDE files
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
-
-# Google Cloud deployment files (if any)
-.gcloudignore
+# NOTE: credits/templates/ is NOT ignored - these are public templates

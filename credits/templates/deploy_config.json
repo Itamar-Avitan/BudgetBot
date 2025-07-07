@@ -1,0 +1,7 @@
+{
+  "project_id": "your-project-id-here",
+  "region": "europe-west1",
+  "app_url": "https://your-project-id-here.ew.r.appspot.com",
+  "service_name": "default",
+  "environment": "production"
+} 

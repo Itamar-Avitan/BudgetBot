@@ -22,17 +22,33 @@ cd budget_chat
 - Google Sheets API credentials
 
 ### **Step 3: Configure Your Bot**
-1. **Fill in your credentials** in `credits/keys_layout.json`
-2. **⚠️ CRITICAL**: Rename the file to `keys.json`:
+1. **Copy the credentials template**:
    ```bash
-   mv credits/keys_layout.json credits/keys.json
+   cp credits/templates/keys.json credits/keys.json
    ```
+2. **Fill in your credentials** in `credits/keys.json` with your actual API keys
 3. **Add Google credentials** file as `credits/google_creds.json`
 
-### **Step 4: Deploy**
+### **Step 4: Configure Deployment**
+1. **Copy the deployment template**:
+   ```bash
+   cp credits/templates/deploy_config.json deploy_config.json
+   ```
+2. **Edit `deploy_config.json`** with your project details:
+   ```json
+   {
+     "project_id": "your-actual-project-id",
+     "region": "europe-west1",
+     "app_url": "https://your-actual-project-id.ew.r.appspot.com",
+     "service_name": "default",
+     "environment": "production"
+   }
+   ```
+
+### **Step 5: Deploy**
 ```bash
-# One-command deployment
-./deploy_gcp.sh
+# First time deployment
+./deploy.sh
 ```
 
 ### **Prerequisites**
@@ -45,7 +61,7 @@ cd budget_chat
 ## 📋 **Required Configuration Files**
 
 ### `credits/keys.json` (Configuration Steps)
-1. **Copy the template**: Use `credits/keys_layout.json` as your starting point
+1. **Copy the template**: `cp credits/templates/keys.json credits/keys.json`
 2. **Replace all placeholders** with your actual credentials:
 ```json
 {
@@ -64,35 +80,54 @@ cd budget_chat
   "USER2_NAME": "Partner Name"
 }
 ```
-3. **⚠️ IMPORTANT**: Rename the file from `keys_layout.json` to `keys.json` after filling in your credentials
 
-📋 **See [credentials example](credits/keys_layout.json) for detailed explanations of each field.**
+📋 **See [credentials template](credits/templates/keys.json) for detailed explanations of each field.**
+
+### `deploy_config.json` (Deployment Configuration)
+1. **Copy the template**: `cp credits/templates/deploy_config.json deploy_config.json`
+2. **Replace with your project details**:
+```json
+{
+  "project_id": "your-actual-project-id",
+  "region": "europe-west1",
+  "app_url": "https://your-actual-project-id.ew.r.appspot.com",
+  "service_name": "default",
+  "environment": "production"
+}
+```
 
 ### `credits/google_creds.json`
 Google service account credentials for Sheets API access.
 
 ## 🔄 **Updates & Maintenance**
 
-### **Super Simple Update** (Recommended)
+### **Your Git Workflow** (You control this)
 ```bash
-# Make your code changes, then:
-./update.sh "Your commit message"
+# 1. Make your code changes
+# 2. Test locally
+# 3. Commit when ready
+git add .
+git commit -m "Your commit message"
+git push origin main
 ```
 
-### **Deploy Only**
+### **Deployment Only** (Scripts handle this)
 ```bash
-# If you just want to deploy without git operations:
-./deploy_gcp.sh
+# Quick redeploy after changes
+./update.sh
+
+# Full deployment (first time or troubleshooting)
+./deploy.sh
+
+# View logs
+./logs.sh
 ```
+
+**Note:** The scripts only handle deployment to Google Cloud - they don't touch your git repository. You maintain full control over when and what gets committed to your public repo.
 
 ### **Monitor Health**
 ```bash
 curl https://YOUR-PROJECT-ID.ew.r.appspot.com/health
-```
-
-### **View Logs**
-```bash
-gcloud app logs tail -s default
 ```
 
 ## 🧠 **Smart Features**

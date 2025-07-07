@@ -56,9 +56,14 @@ budget_chat/
 
 ## 📁 **Step 2: Configure Your Bot**
 
-### **2.1 Create Configuration File**
-1. **Start with the template**: Use the provided `credits/keys_layout.json` as your base
-2. **Replace all placeholder values** with your actual credentials from the [API Setup Guide](API_SETUP.md):
+### **2.1 Create Configuration Files**
+1. **Copy the templates**:
+   ```bash
+   cp credits/templates/keys.json credits/keys.json
+   cp credits/templates/deploy_config.json deploy_config.json
+   ```
+
+2. **Fill in `credits/keys.json`** with your actual credentials from the [API Setup Guide](API_SETUP.md):
 ```json
 {
   "GPT_API_KEY": "your_openai_key_from_api_setup",
@@ -77,12 +82,18 @@ budget_chat/
 }
 ```
 
-3. **⚠️ CRITICAL**: After filling in your credentials, **rename the file from `keys_layout.json` to `keys.json`**
-   ```bash
-   mv credits/keys_layout.json credits/keys.json
-   ```
+3. **Fill in `deploy_config.json`** with your project details:
+```json
+{
+  "project_id": "your-actual-project-id",
+  "region": "europe-west1",
+  "app_url": "https://your-actual-project-id.ew.r.appspot.com",
+  "service_name": "default",
+  "environment": "production"
+}
+```
 
-📋 **Note**: The provided `keys_layout.json` file contains detailed explanations for each field. Use it as a reference.
+📋 **Note**: The templates in `credits/templates/` contain detailed explanations for each field.
 
 ### **2.2 Add Google Credentials**
 Place your downloaded `google_creds.json` file in the `credits/` folder.
@@ -141,8 +152,8 @@ gcloud config set project YOUR-PROJECT-ID
 
 ### **4.1 Deploy to Google Cloud**
 ```bash
-chmod +x deploy_gcp.sh
-./deploy_gcp.sh YOUR-PROJECT-ID
+# First-time deployment
+./deploy.sh
 ```
 
 ### **4.2 Complete WhatsApp Setup**
@@ -166,7 +177,7 @@ chmod +x deploy_gcp.sh
 #### **"Webhook verification failed"**
 - Check your verify token in `keys.json` matches Meta settings
 - Ensure your bot is deployed and accessible
-- Verify you renamed `keys_layout.json` to `keys.json`
+- Verify you copied the template: `cp credits/templates/keys.json credits/keys.json`
 
 #### **"שירות הבינה המלאכותית אינו זמין"**
 - Check your OpenAI API key is correct
@@ -176,7 +187,7 @@ chmod +x deploy_gcp.sh
 #### **"Google Sheets access denied"**
 - Verify you shared the sheets with your service account email
 - Check the Sheet IDs are correct in `keys.json`
-- Ensure you renamed `keys_layout.json` to `keys.json`
+- Ensure you copied the template: `cp credits/templates/keys.json credits/keys.json`
 
 #### **"Budget categories not found"**
 - Ensure your budget sheet has the correct headers
@@ -233,7 +244,8 @@ Your WhatsApp budget bot is now running!
 
 ### **Updates**
 ```bash
-./update.sh "Added new feature"
+# After making code changes
+./update.sh
 ```
 
 **Need help?** Check the troubleshooting section or review the logs.

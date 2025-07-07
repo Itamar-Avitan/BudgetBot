@@ -1,0 +1,45 @@
+# .gcloudignore - Files to exclude from Google Cloud deployment
+
+# Git and development files
+.git/
+.gitignore
+
+# Python cache and virtual environments
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+env/
+
+# Personal directories
+Desktop/
+
+# Build and temporary files
+build/
+dist/
+*.egg-info/
+.cache/
+*.tmp
+*.temp
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local development files
+.env
+.env.local
+
+# Keep documentation and templates (they're useful for reference)
+# README.md - keep for documentation
+# guides/ - keep for documentation
+# credits/templates/ - keep for reference
+# deploy.sh, update.sh, logs.sh - keep for reference
+
