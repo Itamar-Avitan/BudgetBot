@@ -1,10 +1,10 @@
-runtime: python39
+runtime: python311
 
-# Always-on configuration to prevent cold starts
+# Optimized scaling within free tier
 automatic_scaling:
   min_instances: 1
-  max_instances: 10
-  target_cpu_utilization: 0.6
+  max_instances: 3          # Reduced from 10 (more efficient)
+  target_cpu_utilization: 0.5  # Scale up sooner (from 0.6)
 
 # Environment variables for the application
 env_variables:
@@ -26,11 +26,11 @@ liveness_check:
   failure_threshold: 2
   success_threshold: 2
 
-# Resource limits (optimized for cost)
+# MAXED OUT free tier resources
 resources:
-  cpu: 0.5
-  memory_gb: 0.5
-  disk_size_gb: 5
+  cpu: 1              # 2x faster (was 0.5)
+  memory_gb: 1        # 2x more memory (was 0.5)
+  disk_size_gb: 10    # 2x more disk (was 5)
 
 # Timeout configuration for webhooks - using full version
-entrypoint: gunicorn -b :$PORT whatsapp:app --timeout 60 --workers 2 
+entrypoint: gunicorn -b :$PORT whatsapp:app --timeout 60 --workers 2 --worker-class sync --max-requests 1000 
