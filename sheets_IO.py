@@ -2,6 +2,7 @@ import google.auth
 from googleapiclient.discovery import build
 import json
 import os
+import time
 from google.oauth2 import service_account
 from typing import Dict, List, Optional, Union
 
@@ -53,17 +54,36 @@ class SheetsIO:
         self.budget_spreadsheet_id = budget_spreadsheet_id
         self.tracker_spreadsheet_id = tracker_spreadsheet_id
         self.service = build("sheets", "v4", credentials=creds)
+        
+        # Cache for working sheet name to reduce API calls
+        self._working_sheet_cache = None
+        self._cache_timestamp = 0
+        self._cache_ttl = 300  # 5 minutes cache
+
+    def _execute_with_retry(self, api_call, max_retries=3, delay=1):
+        """Execute API call with retry logic for network resilience."""
+        for attempt in range(max_retries):
+            try:
+                return api_call.execute()
+            except Exception as e:
+                if attempt == max_retries - 1:  # Last attempt
+                    raise e
+                print(f"API call failed (attempt {attempt + 1}/{max_retries}): {e}")
+                time.sleep(delay * (attempt + 1))  # Exponential backoff
+        return None
 
     def get_config_value(self, key: str) -> str:
         """Get configuration value from __configs sheet on budget spreadsheet."""
         try:
             config_range = "__configs!A:B"
-            response = self.service.spreadsheets().values().get(
-                spreadsheetId=self.budget_spreadsheet_id,
-                range=config_range
-            ).execute()
+            response = self._execute_with_retry(
+                self.service.spreadsheets().values().get(
+                    spreadsheetId=self.budget_spreadsheet_id,
+                    range=config_range
+                )
+            )
             
-            values = response.get('values', [])
+            values = response.get('values', []) if response else []
             if not values:
                 raise ValueError("No configuration data found")
                 
@@ -76,23 +96,97 @@ class SheetsIO:
             
         except Exception as e:
             print(f"Error reading config: {e}")
-            return "July"  # Default fallback
+            # Return special indicator for config failure
+            raise ConfigurationError(f"Could not read config for key '{key}': {e}")
+
+    def set_config_value(self, key: str, value: str) -> None:
+        """Set configuration value in __configs sheet on budget spreadsheet."""
+        try:
+            config_range = "__configs!A:B"
+            
+            # Get current config data
+            response = self._execute_with_retry(
+                self.service.spreadsheets().values().get(
+                    spreadsheetId=self.budget_spreadsheet_id,
+                    range=config_range
+                )
+            )
+            
+            values = response.get('values', []) if response else []
+            
+            # Find if key exists
+            key_row = None
+            for i, row in enumerate(values):
+                if len(row) >= 1 and row[0] == key:
+                    key_row = i + 1  # 1-based for sheets
+                    break
+            
+            if key_row:
+                # Update existing key
+                update_range = f"__configs!B{key_row}"
+                self._execute_with_retry(
+                    self.service.spreadsheets().values().update(
+                        spreadsheetId=self.budget_spreadsheet_id,
+                        range=update_range,
+                        valueInputOption="RAW",
+                        body={"values": [[value]]}
+                    )
+                )
+            else:
+                # Add new key-value pair
+                append_range = "__configs!A:B"
+                self._execute_with_retry(
+                    self.service.spreadsheets().values().append(
+                        spreadsheetId=self.budget_spreadsheet_id,
+                        range=append_range,
+                        valueInputOption="RAW",
+                        insertDataOption="INSERT_ROWS",
+                        body={"values": [[key, value]]}
+                    )
+                )
+            
+            print(f"Set config value: {key} = {value}")
+            
+        except Exception as e:
+            print(f"Error setting config value: {e}")
+            raise
 
     def get_working_sheet_name(self) -> str:
-        """Get the current working sheet name from configuration."""
-        return self.get_config_value("working_sheet")
+        """Get the current working sheet name from configuration with caching."""
+        current_time = time.time()
+        
+        # Check if cache is still valid
+        if (self._working_sheet_cache and 
+            current_time - self._cache_timestamp < self._cache_ttl):
+            return self._working_sheet_cache
+        
+        try:
+            # Get from API and cache
+            sheet_name = self.get_config_value("working_sheet")
+            self._working_sheet_cache = sheet_name
+            self._cache_timestamp = current_time
+            return sheet_name
+        except Exception as e:
+            # If config read fails, try to use cached value
+            if self._working_sheet_cache:
+                print(f"Using cached working sheet name due to config error: {e}")
+                return self._working_sheet_cache
+            # If no cache, raise the error
+            raise e
 
     def get_budget_categories(self) -> List[str]:
         """Get all available categories from budget sheet."""
         try:
             working_sheet = self.get_working_sheet_name()
             data_range = f"{working_sheet}!A:A"
-            response = self.service.spreadsheets().values().get(
-                spreadsheetId=self.budget_spreadsheet_id,
-                range=data_range
-            ).execute()
+            response = self._execute_with_retry(
+                self.service.spreadsheets().values().get(
+                    spreadsheetId=self.budget_spreadsheet_id,
+                    range=data_range
+                )
+            )
             
-            values = response.get('values', [])
+            values = response.get('values', []) if response else []
             if not values:
                 return []
             
@@ -123,24 +217,28 @@ class SheetsIO:
             
             # Get headers from tracker sheet
             header_range = f"{working_sheet}!A1:Z1"
-            header_resp = self.service.spreadsheets().values().get(
-                spreadsheetId=self.tracker_spreadsheet_id,
-                range=header_range
-            ).execute()
-            headers = header_resp.get("values", [[]])[0]
+            header_resp = self._execute_with_retry(
+                self.service.spreadsheets().values().get(
+                    spreadsheetId=self.tracker_spreadsheet_id,
+                    range=header_range
+                )
+            )
+            headers = header_resp.get("values", [[]])[0] if header_resp else []
             
             # Build row in correct order
             row = [tracker_data.get(h, "") for h in headers]
             
             # Append to tracker sheet
             append_range = f"{working_sheet}!A:Z"
-            self.service.spreadsheets().values().append(
-                spreadsheetId=self.tracker_spreadsheet_id,
-                range=append_range,
-                valueInputOption="RAW",
-                insertDataOption="INSERT_ROWS",
-                body={"values": [row]}
-            ).execute()
+            self._execute_with_retry(
+                self.service.spreadsheets().values().append(
+                    spreadsheetId=self.tracker_spreadsheet_id,
+                    range=append_range,
+                    valueInputOption="RAW",
+                    insertDataOption="INSERT_ROWS",
+                    body={"values": [row]}
+                )
+            )
             
             print(f"Added expense to tracker: {tracker_data}")
             
@@ -148,8 +246,8 @@ class SheetsIO:
             print(f"Error adding expense to tracker: {e}")
             raise
 
-    def update_budget_sheet(self, category: str) -> None:
-        """Update budget sheet by recalculating expenses for a category."""
+    def update_budget_sheet(self, category: str) -> bool:
+        """Update budget sheet by recalculating expenses for a category. Returns success status."""
         try:
             working_sheet = self.get_working_sheet_name()
             
@@ -158,14 +256,16 @@ class SheetsIO:
             
             # Find the category row in budget sheet
             budget_range = f"{working_sheet}!A:Z"
-            response = self.service.spreadsheets().values().get(
-                spreadsheetId=self.budget_spreadsheet_id,
-                range=budget_range
-            ).execute()
+            response = self._execute_with_retry(
+                self.service.spreadsheets().values().get(
+                    spreadsheetId=self.budget_spreadsheet_id,
+                    range=budget_range
+                )
+            )
             
-            values = response.get('values', [])
+            values = response.get('values', []) if response else []
             if not values:
-                return
+                return False
             
             headers = values[0]
             data_rows = values[1:]
@@ -188,42 +288,49 @@ class SheetsIO:
                     
                     # Update spent amount
                     spent_range = f"{working_sheet}!{chr(65 + spent_col)}{sheet_row}"
-                    self.service.spreadsheets().values().update(
-                        spreadsheetId=self.budget_spreadsheet_id,
-                        range=spent_range,
-                        valueInputOption="RAW",
-                        body={"values": [[total_spent]]}
-                    ).execute()
+                    self._execute_with_retry(
+                        self.service.spreadsheets().values().update(
+                            spreadsheetId=self.budget_spreadsheet_id,
+                            range=spent_range,
+                            valueInputOption="RAW",
+                            body={"values": [[total_spent]]}
+                        )
+                    )
                     
                     # Update remaining amount
                     remaining_range = f"{working_sheet}!{chr(65 + remaining_col)}{sheet_row}"
-                    self.service.spreadsheets().values().update(
-                        spreadsheetId=self.budget_spreadsheet_id,
-                        range=remaining_range,
-                        valueInputOption="RAW",
-                        body={"values": [[remaining_amount]]}
-                    ).execute()
+                    self._execute_with_retry(
+                        self.service.spreadsheets().values().update(
+                            spreadsheetId=self.budget_spreadsheet_id,
+                            range=remaining_range,
+                            valueInputOption="RAW",
+                            body={"values": [[remaining_amount]]}
+                        )
+                    )
                     
                     print(f"Updated budget for {category}: spent={total_spent}, remaining={remaining_amount}")
-                    return
+                    return True
             
             print(f"Category '{category}' not found in budget sheet")
+            return False
             
         except Exception as e:
-            print(f"Error updating budget sheet: {e}")
-            raise
+            print(f"Error updating budget sheet for {category}: {e}")
+            return False
 
     def _calculate_category_total(self, category: str) -> float:
         """Calculate total spent for a category from tracker sheet."""
         try:
             working_sheet = self.get_working_sheet_name()
             data_range = f"{working_sheet}!A:Z"
-            response = self.service.spreadsheets().values().get(
-                spreadsheetId=self.tracker_spreadsheet_id,
-                range=data_range
-            ).execute()
+            response = self._execute_with_retry(
+                self.service.spreadsheets().values().get(
+                    spreadsheetId=self.tracker_spreadsheet_id,
+                    range=data_range
+                )
+            )
             
-            values = response.get('values', [])
+            values = response.get('values', []) if response else []
             if not values:
                 return 0.0
             
@@ -248,20 +355,193 @@ class SheetsIO:
             return total
             
         except Exception as e:
-            print(f"Error calculating category total: {e}")
+            print(f"Error calculating category total for {category}: {e}")
             return 0.0
+
+    def refresh_all_budgets(self) -> Dict:
+        """Refresh all budget categories with optimized batch operations."""
+        try:
+            working_sheet = self.get_working_sheet_name()
+            categories = self.get_budget_categories()
+            
+            if not categories:
+                return {
+                    "success": False,
+                    "error": "לא נמצאו קטגוריות לעדכון",
+                    "updated_count": 0,
+                    "failed_categories": []
+                }
+            
+            print(f"🚀 Starting optimized batch refresh for {len(categories)} categories...")
+            
+            # API Call #1: Read tracker sheet ONCE
+            print("📖 Reading tracker sheet (all data)...")
+            tracker_range = f"{working_sheet}!A:Z"
+            tracker_response = self._execute_with_retry(
+                self.service.spreadsheets().values().get(
+                    spreadsheetId=self.tracker_spreadsheet_id,
+                    range=tracker_range
+                )
+            )
+            
+            # API Call #2: Read budget sheet ONCE
+            print("📊 Reading budget sheet (all data)...")
+            budget_range = f"{working_sheet}!A:Z"
+            budget_response = self._execute_with_retry(
+                self.service.spreadsheets().values().get(
+                    spreadsheetId=self.budget_spreadsheet_id,
+                    range=budget_range
+                )
+            )
+            
+            # Process data in memory
+            tracker_data = tracker_response.get('values', []) if tracker_response else []
+            budget_data = budget_response.get('values', []) if budget_response else []
+            
+            if not tracker_data or not budget_data:
+                return {
+                    "success": False,
+                    "error": "לא נמצא מידע בגיליונות",
+                    "updated_count": 0,
+                    "failed_categories": []
+                }
+            
+            # Get headers
+            tracker_headers = tracker_data[0] if tracker_data else []
+            budget_headers = budget_data[0] if budget_data else []
+            
+            # Find column indices
+            try:
+                tracker_cat_col = tracker_headers.index("קטגוריה") if "קטגוריה" in tracker_headers else 0
+                tracker_price_col = tracker_headers.index("מחיר") if "מחיר" in tracker_headers else 2
+                
+                budget_cat_col = budget_headers.index("קטגוריה") if "קטגוריה" in budget_headers else 0
+                budget_amt_col = budget_headers.index("תקציב") if "תקציב" in budget_headers else 1
+                spent_col = budget_headers.index("כמה יצא") if "כמה יצא" in budget_headers else 2
+                remaining_col = budget_headers.index("כמה נשאר") if "כמה נשאר" in budget_headers else 3
+            except ValueError as e:
+                return {
+                    "success": False,
+                    "error": f"לא נמצאו עמודות נדרשות: {e}",
+                    "updated_count": 0,
+                    "failed_categories": []
+                }
+            
+            # Calculate totals for all categories in memory (FAST!)
+            print("🧠 Processing all categories in memory...")
+            category_totals = {}
+            for row in tracker_data[1:]:  # Skip header
+                if len(row) > max(tracker_cat_col, tracker_price_col):
+                    cat = row[tracker_cat_col] if tracker_cat_col < len(row) else ""
+                    price_str = row[tracker_price_col] if tracker_price_col < len(row) else "0"
+                    
+                    if cat and price_str:
+                        try:
+                            price = float(price_str)
+                            category_totals[cat] = category_totals.get(cat, 0) + price
+                        except ValueError:
+                            continue
+            
+            # Prepare batch updates
+            print("📝 Preparing batch updates...")
+            batch_updates = []
+            updated_count = 0
+            failed_categories = []
+            
+            budget_rows = budget_data[1:] if len(budget_data) > 1 else []
+            for row_idx, row in enumerate(budget_rows, start=2):  # Start from row 2 (1-based)
+                if len(row) > budget_cat_col:
+                    category = row[budget_cat_col]
+                    if category in categories:  # Only update categories we track
+                        try:
+                            spent = category_totals.get(category, 0)
+                            budget_amt = float(row[budget_amt_col]) if budget_amt_col < len(row) and row[budget_amt_col] else 0
+                            remaining = budget_amt - spent
+                            
+                            # Prepare update for this row (spent and remaining columns)
+                            spent_cell = f"{working_sheet}!{chr(65 + spent_col)}{row_idx}"
+                            remaining_cell = f"{working_sheet}!{chr(65 + remaining_col)}{row_idx}"
+                            
+                            batch_updates.extend([
+                                {
+                                    "range": spent_cell,
+                                    "values": [[spent]]
+                                },
+                                {
+                                    "range": remaining_cell,
+                                    "values": [[remaining]]
+                                }
+                            ])
+                            
+                            updated_count += 1
+                            print(f"   ⚡ Prepared update for {category}: spent={spent}, remaining={remaining}")
+                            
+                        except Exception as e:
+                            print(f"   ❌ Failed to prepare update for {category}: {e}")
+                            failed_categories.append(category)
+            
+            # API Call #3: Execute batch update (ONE CALL FOR ALL CATEGORIES!)
+            if batch_updates:
+                print(f"📤 Executing batch update for {len(batch_updates)} cells...")
+                batch_body = {
+                    "valueInputOption": "RAW",
+                    "data": batch_updates
+                }
+                
+                self._execute_with_retry(
+                    self.service.spreadsheets().values().batchUpdate(
+                        spreadsheetId=self.budget_spreadsheet_id,
+                        body=batch_body
+                    )
+                )
+                
+                print(f"✅ Batch update completed successfully!")
+            
+            # Return result in expected format
+            if updated_count == 0:
+                return {
+                    "success": False,
+                    "error": "לא עודכנו קטגוריות",
+                    "updated_count": 0,
+                    "failed_categories": failed_categories
+                }
+            elif failed_categories:
+                return {
+                    "success": True,
+                    "partial": True,
+                    "updated_count": updated_count,
+                    "failed_categories": failed_categories,
+                    "message": f"עודכנו {updated_count} קטגוריות, {len(failed_categories)} נכשלו"
+                }
+            else:
+                return {
+                    "success": True,
+                    "updated_count": updated_count,
+                    "message": f"עודכנו בהצלחה {updated_count} קטגוריות בשיטה מהירה!"
+                }
+                
+        except Exception as e:
+            print(f"❌ Error in optimized batch refresh: {e}")
+            return {
+                "success": False,
+                "error": f"שגיאה כללית ברענון: {e}",
+                "updated_count": 0,
+                "failed_categories": []
+            }
 
     def get_recent_transactions(self, limit: int = 20) -> List[Dict]:
         """Get recent transactions from tracker sheet."""
         try:
             working_sheet = self.get_working_sheet_name()
             data_range = f"{working_sheet}!A:Z"
-            response = self.service.spreadsheets().values().get(
-                spreadsheetId=self.tracker_spreadsheet_id,
-                range=data_range
-            ).execute()
+            response = self._execute_with_retry(
+                self.service.spreadsheets().values().get(
+                    spreadsheetId=self.tracker_spreadsheet_id,
+                    range=data_range
+                )
+            )
             
-            values = response.get('values', [])
+            values = response.get('values', []) if response else []
             if not values:
                 return []
             
@@ -290,12 +570,14 @@ class SheetsIO:
         try:
             working_sheet = self.get_working_sheet_name()
             data_range = f"{working_sheet}!A:Z"
-            response = self.service.spreadsheets().values().get(
-                spreadsheetId=self.budget_spreadsheet_id,
-                range=data_range
-            ).execute()
+            response = self._execute_with_retry(
+                self.service.spreadsheets().values().get(
+                    spreadsheetId=self.budget_spreadsheet_id,
+                    range=data_range
+                )
+            )
             
-            values = response.get('values', [])
+            values = response.get('values', []) if response else []
             if not values:
                 return []
             
@@ -392,34 +674,41 @@ class SheetsIO:
         """Create a new sheet with RTL support and headers."""
         # Create the sheet
         req = [{"addSheet": {"properties": {"title": sheet_name, "rightToLeft": True}}}]
-        response = self.service.spreadsheets().batchUpdate(
-            spreadsheetId=spreadsheet_id,
-            body={"requests": req}
-        ).execute()
+        response = self._execute_with_retry(
+            self.service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={"requests": req}
+            )
+        )
+        
+        # Check if response is valid
+        if not response or not response.get("replies"):
+            raise Exception(f"Failed to create sheet '{sheet_name}' - no response from API")
         
         sheet_id = response["replies"][0]["addSheet"]["properties"]["sheetId"]
         
         # Add headers
         header_range = f"{sheet_name}!A1:Z1"
-        self.service.spreadsheets().values().update(
-            spreadsheetId=spreadsheet_id,
-            range=header_range,
-            valueInputOption="RAW",
-            body={"values": [headers]}
-        ).execute()
+        self._execute_with_retry(
+            self.service.spreadsheets().values().update(
+                spreadsheetId=spreadsheet_id,
+                range=header_range,
+                valueInputOption="RAW",
+                body={"values": [headers]}
+            )
+        )
         
         print(f"Created sheet '{sheet_name}' with headers in spreadsheet {spreadsheet_id}")
     
     def sheet_exists(self, spreadsheet_id: str, sheet_name: str) -> bool:
         """Check if sheet exists in specific spreadsheet."""
         try:
-            meta = self.service.spreadsheets().get(
-                spreadsheetId=spreadsheet_id,
-                fields="sheets.properties"
-            ).execute()
-            for s in meta.get("sheets", []):
-                props = s["properties"]
-                if props.get("title") == sheet_name:
+            # Get spreadsheet metadata
+            metadata = self.service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+            sheets = metadata.get('sheets', []) if metadata else []
+            
+            for sheet in sheets:
+                if sheet.get('properties', {}).get('title') == sheet_name:
                     return True
             return False
         except Exception:
@@ -430,20 +719,24 @@ class SheetsIO:
         try:
             # First, read the entire __configs sheet to find the correct row
             config_range = "__configs!A:B"
-            response = self.service.spreadsheets().values().get(
-                spreadsheetId=self.budget_spreadsheet_id,
-                range=config_range
-            ).execute()
+            response = self._execute_with_retry(
+                self.service.spreadsheets().values().get(
+                    spreadsheetId=self.budget_spreadsheet_id,
+                    range=config_range
+                )
+            )
             
-            values = response.get('values', [])
+            values = response.get('values', []) if response else []
             if not values:
                 # If no config exists, create it
-                self.service.spreadsheets().values().update(
-                    spreadsheetId=self.budget_spreadsheet_id,
-                    range="__configs!A1:B1",
-                    valueInputOption="RAW",
-                    body={"values": [["working_sheet", new_sheet_name]]}
-                ).execute()
+                self._execute_with_retry(
+                    self.service.spreadsheets().values().update(
+                        spreadsheetId=self.budget_spreadsheet_id,
+                        range="__configs!A1:B1",
+                        valueInputOption="RAW",
+                        body={"values": [["working_sheet", new_sheet_name]]}
+                    )
+                )
                 return {"success": True, "updated_to": new_sheet_name, "action": "created"}
             
             # Find the row with working_sheet key
@@ -451,24 +744,28 @@ class SheetsIO:
                 if len(row) >= 1 and row[0] == "working_sheet":
                     # Update the value in the same row, column B
                     update_range = f"__configs!B{row_idx + 1}"
-                    self.service.spreadsheets().values().update(
-                        spreadsheetId=self.budget_spreadsheet_id,
-                        range=update_range,
-                        valueInputOption="RAW",
-                        body={"values": [[new_sheet_name]]}
-                    ).execute()
+                    self._execute_with_retry(
+                        self.service.spreadsheets().values().update(
+                            spreadsheetId=self.budget_spreadsheet_id,
+                            range=update_range,
+                            valueInputOption="RAW",
+                            body={"values": [[new_sheet_name]]}
+                        )
+                    )
                     
                     print(f"Updated working_sheet config from '{row[1] if len(row) > 1 else 'undefined'}' to '{new_sheet_name}'")
                     return {"success": True, "updated_to": new_sheet_name, "action": "updated"}
             
             # If working_sheet key not found, append it
             next_row = len(values) + 1
-            self.service.spreadsheets().values().update(
-                spreadsheetId=self.budget_spreadsheet_id,
-                range=f"__configs!A{next_row}:B{next_row}",
-                valueInputOption="RAW",
-                body={"values": [["working_sheet", new_sheet_name]]}
-            ).execute()
+            self._execute_with_retry(
+                self.service.spreadsheets().values().update(
+                    spreadsheetId=self.budget_spreadsheet_id,
+                    range=f"__configs!A{next_row}:B{next_row}",
+                    valueInputOption="RAW",
+                    body={"values": [["working_sheet", new_sheet_name]]}
+                )
+            )
             
             return {"success": True, "updated_to": new_sheet_name, "action": "appended"}
             
@@ -512,12 +809,14 @@ class SheetsIO:
             # Write to budget sheet
             if rows:
                 data_range = f"{sheet_name}!A2:D{len(rows) + 1}"  # Start from row 2 (after headers)
-                self.service.spreadsheets().values().update(
-                    spreadsheetId=self.budget_spreadsheet_id,
-                    range=data_range,
-                    valueInputOption="RAW",
-                    body={"values": rows}
-                ).execute()
+                self._execute_with_retry(
+                    self.service.spreadsheets().values().update(
+                        spreadsheetId=self.budget_spreadsheet_id,
+                        range=data_range,
+                        valueInputOption="RAW",
+                        body={"values": rows}
+                    )
+                )
             
             return {"success": True, "categories_added": len(rows)}
             
@@ -557,6 +856,33 @@ class SheetsIO:
         except Exception as e:
             return {"success": False, "error": str(e), "details": results}
 
+    def get_available_sheets(self) -> List[str]:
+        """Get all available sheet names (excluding system sheets)."""
+        try:
+            meta = self._execute_with_retry(
+                self.service.spreadsheets().get(
+                    spreadsheetId=self.budget_spreadsheet_id,
+                    fields="sheets.properties"
+                )
+            )
+            
+            if not meta:
+                return []
+            
+            sheets = []
+            for sheet in meta.get("sheets", []):
+                sheet_name = sheet["properties"]["title"]
+                # Skip system sheets
+                if not sheet_name.startswith("__"):
+                    sheets.append(sheet_name)
+            return sheets
+        except Exception as e:
+            print(f"Error getting available sheets: {e}")
+            return []
+
+class ConfigurationError(Exception):
+    """Raised when configuration cannot be read."""
+    pass
 
 # Legacy compatibility class for existing code
 class Sheets_analyzer:
@@ -591,13 +917,14 @@ class Sheets_analyzer:
             else:
                 summary = self.sheets_io.get_budget_summary()
                 analysis: Dict = {}
-                for item in summary:
-                    cat = item.get("קטגוריה", "")
-                    if cat:
-                        analysis[cat] = {
-                            "תקציב": float(item.get("תקציב", 0)) if item.get("תקציב") else 0,
-                            "כמה יצא": float(item.get("כמה יצא", 0)) if item.get("כמה יצא") else 0,
-                            "כמה נשאר": float(item.get("כמה נשאר", 0)) if item.get("כמה נשאר") else 0
-                        }
+                if summary:  # Check if summary is not None or empty
+                    for item in summary:
+                        cat = item.get("קטגוריה", "")
+                        if cat:
+                            analysis[cat] = {
+                                "תקציב": float(item.get("תקציב", 0)) if item.get("תקציב") else 0,
+                                "כמה יצא": float(item.get("כמה יצא", 0)) if item.get("כמה יצא") else 0,
+                                "כמה נשאר": float(item.get("כמה נשאר", 0)) if item.get("כמה נשאר") else 0
+                            }
                 return analysis
         return {}

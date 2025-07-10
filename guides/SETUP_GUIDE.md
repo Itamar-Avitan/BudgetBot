@@ -108,9 +108,9 @@ nano credits/keys.json
     "IO_SPREADSHEET_ID": "YOUR-TRACKER-SPREADSHEET-ID",
     "SUMMARY_SPREADSHEET_ID": "YOUR-BUDGET-SPREADSHEET-ID",
     "USER1_PHONE": "YOUR-PHONE-WITHOUT-PLUS",
-    "USER1_NAME": "Your Name",
+  "USER1_NAME": "Your Name",
     "USER2_PHONE": "PARTNER-PHONE-WITHOUT-PLUS", 
-    "USER2_NAME": "Partner Name"
+  "USER2_NAME": "Partner Name"
 }
 ```
 
@@ -221,16 +221,16 @@ Bot: 💰 סה"כ נשאר: 2,340₪
 After completing all steps, verify everything works:
 
 - [ ] **Health check**: Visit `https://your-project-id.ew.r.appspot.com/health`
-  ```json
-  {
-    "status": "healthy",
-    "components": {
-      "google_sheets": "healthy",
-      "gpt_api": "healthy",
-      "categories_count": 6
-    }
+```json
+{
+  "status": "healthy",
+  "components": {
+    "google_sheets": "healthy",
+    "gpt_api": "healthy",
+    "categories_count": 6
   }
-  ```
+}
+```
 
 - [ ] **WhatsApp response**: Send `יתרה` and get a response
 - [ ] **Expense tracking**: Send `קניתי קפה ב-15` and see it recorded

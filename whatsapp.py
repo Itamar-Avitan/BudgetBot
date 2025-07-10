@@ -1,8 +1,11 @@
 import os
 import requests
 import json
+import time
+import hashlib
+import threading
 from datetime import datetime, timedelta
-from typing import List
+from typing import List, Dict, Optional
 from flask import Flask, request
 from sheets_IO import SheetsIO, Sheets_analyzer
 from GPT_API import GPT_API
@@ -10,48 +13,61 @@ from GPT_API import GPT_API
 # ---------------------------------------------------------------------------
 # Load configuration - Environment variables for production or keys.json for local
 # ---------------------------------------------------------------------------
-
 def load_config():
     """Load configuration from environment variables or keys.json file."""
     config = {}
     
-    # Try to load from environment variables first (for production)
-    if os.getenv('META_ACCESS_TOKEN'):
-        config = {
-            "META_ACCESS_TOKEN": os.getenv('META_ACCESS_TOKEN'),
-            "META_PHONE_NUMBER_ID": os.getenv('META_PHONE_NUMBER_ID'),
-            "META_WEBHOOK_VERIFY_TOKEN": os.getenv('META_WEBHOOK_VERIFY_TOKEN'),
-            "META_PHONE_NUMBER": os.getenv('META_PHONE_NUMBER'),
-            "SUMMARY_SPREADSHEET_ID": os.getenv('BUDGET_SHEET_ID'),
-            "IO_SPREADSHEET_ID": os.getenv('TRACKER_SHEET_ID'),
-            "GPT_API_KEY": os.getenv('OPENAI_API_KEY'),
-            "USER1_PHONE": os.getenv('USER1_PHONE', '1234567890'),
-            "USER1_NAME": os.getenv('USER1_NAME', 'משתמש 1'),
-            "USER2_PHONE": os.getenv('USER2_PHONE', '0987654321'),
-            "USER2_NAME": os.getenv('USER2_NAME', 'משתמש 2'),
-        }
-    else:
-        # Fall back to keys.json for local development
-        try:
-            with open('credits/keys.json', 'r') as f:
-                config = json.load(f)
-        except FileNotFoundError:
-            raise RuntimeError("Configuration not found. Please set environment variables or create credits/keys.json")
+    # Try environment variables first (for production)
+    env_vars = [
+        'WHATSAPP_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID', 'VERIFY_TOKEN', 'GPT_API_KEY',
+        'META_ACCESS_TOKEN', 'META_PHONE_NUMBER_ID', 'META_WEBHOOK_VERIFY_TOKEN',
+        'SUMMARY_SPREADSHEET_ID', 'IO_SPREADSHEET_ID', 'USER1_PHONE', 'USER1_NAME',
+        'USER2_PHONE', 'USER2_NAME'
+    ]
+    
+    for var in env_vars:
+        value = os.getenv(var)
+        if value:
+            config[var] = value
+    
+    # Always try to load from keys.json to get missing values
+    try:
+        with open('credits/keys.json', 'r') as f:
+            file_config = json.load(f)
+            # Only add keys that aren't already in config
+            for key, value in file_config.items():
+                if key not in config:
+                    config[key] = value
+    except FileNotFoundError:
+        print("Warning: credits/keys.json not found and some environment variables may not be set")
     
     return config
 
-keys = load_config()
+# Load configuration
+config = load_config()
+print(f"DEBUG: Config loaded with {len(config)} keys")
+print(f"DEBUG: SUMMARY_SPREADSHEET_ID = '{config.get('SUMMARY_SPREADSHEET_ID', 'NOT_FOUND')}'")
+print(f"DEBUG: IO_SPREADSHEET_ID = '{config.get('IO_SPREADSHEET_ID', 'NOT_FOUND')}'")
 
-# Meta WhatsApp Business API
-META_ACCESS_TOKEN = keys["META_ACCESS_TOKEN"]
-META_PHONE_NUMBER_ID = keys["META_PHONE_NUMBER_ID"]
-META_VERIFY_TOKEN = keys["META_WEBHOOK_VERIFY_TOKEN"]
-META_PHONE_NUMBER = keys["META_PHONE_NUMBER"]
+WHATSAPP_TOKEN = config.get('WHATSAPP_TOKEN', config.get('META_ACCESS_TOKEN', ''))
+WHATSAPP_PHONE_NUMBER_ID = config.get('WHATSAPP_PHONE_NUMBER_ID', config.get('META_PHONE_NUMBER_ID', ''))
+VERIFY_TOKEN = config.get('VERIFY_TOKEN', config.get('META_WEBHOOK_VERIFY_TOKEN', ''))
+GPT_API_KEY = config.get('GPT_API_KEY', '')
 
-# Google Sheets - New architecture
-BUDGET_SHEET_ID = keys["SUMMARY_SPREADSHEET_ID"]    # Budget sheet with categories, budgets, spent, remaining
-TRACKER_SHEET_ID = keys["IO_SPREADSHEET_ID"]         # Tracker sheet with individual transactions
-GPT_API_KEY = keys["GPT_API_KEY"]
+# Google Sheets configuration
+BUDGET_SPREADSHEET_ID = config.get('SUMMARY_SPREADSHEET_ID', '')
+TRACKER_SPREADSHEET_ID = config.get('IO_SPREADSHEET_ID', '')
+
+print(f"DEBUG: Final BUDGET_SPREADSHEET_ID = '{BUDGET_SPREADSHEET_ID}'")
+print(f"DEBUG: Final TRACKER_SPREADSHEET_ID = '{TRACKER_SPREADSHEET_ID}'")
+
+# Initialize services
+sheets_io = SheetsIO(BUDGET_SPREADSHEET_ID, TRACKER_SPREADSHEET_ID) if BUDGET_SPREADSHEET_ID and TRACKER_SPREADSHEET_ID else None
+gpt = None
+
+# Smart deduplication with persistent storage
+REFRESH_COOLDOWN_SECONDS = 30  # Prevent refresh spam
+LAST_REFRESH_CELL = "Config!E1"  # Store last refresh timestamp in sheets
 
 # ---------------------------------------------------------------------------
 # Initialize helpers with new architecture
@@ -59,10 +75,13 @@ GPT_API_KEY = keys["GPT_API_KEY"]
 
 # Initialize GPT lazily to avoid startup issues
 gpt = None
-sheets_io = SheetsIO(BUDGET_SHEET_ID, TRACKER_SHEET_ID)
-analyzer = Sheets_analyzer(BUDGET_SHEET_ID)
+analyzer = Sheets_analyzer(BUDGET_SPREADSHEET_ID)
 analyzer.sheets_io = sheets_io  # type: ignore  # Link for compatibility
 app = Flask(__name__)
+
+# Use message ID for deduplication instead of content hash
+PROCESSED_MESSAGE_IDS = {}  # {message_id: timestamp}
+MESSAGE_ID_CACHE_TTL = 300  # 5 minutes
 
 def get_gpt():
     """Get GPT client, initializing it if needed."""
@@ -80,17 +99,104 @@ def get_gpt():
             gpt = None
     return gpt
 
+def is_refresh_allowed(sender: str) -> tuple[bool, int, int]:
+    """Check if refresh is allowed using Google Sheets as persistent storage.
+    Returns (is_allowed, remaining_seconds, elapsed_seconds)"""
+    try:
+        # Get last refresh timestamp from sheets
+        last_refresh_str = sheets_io.get_config_value("last_refresh_timestamp")
+        if not last_refresh_str:
+            return (True, 0, 0)
+            
+        last_refresh = float(last_refresh_str)
+        current_time = time.time()
+        elapsed = int(current_time - last_refresh)
+        
+        # Check cooldown period
+        if elapsed < REFRESH_COOLDOWN_SECONDS:
+            remaining = int(REFRESH_COOLDOWN_SECONDS - elapsed)
+            return (False, remaining, elapsed)
+            
+        return (True, 0, elapsed)
+    except Exception as e:
+        print(f"Error checking refresh cooldown: {e}")
+        return (True, 0, 0)  # Allow refresh if we can't check
+
+def set_refresh_timestamp():
+    """Set current timestamp as last refresh time in sheets."""
+    try:
+        current_time = str(time.time())
+        sheets_io.set_config_value("last_refresh_timestamp", current_time)
+    except Exception as e:
+        print(f"Error setting refresh timestamp: {e}")
+
+def perform_smart_refresh(sender: str, user_info: dict) -> dict:
+    """Perform refresh with smart optimizations and return results."""
+    try:
+        print(f"Starting smart refresh for {sender}")
+        
+        # Set refresh timestamp first
+        set_refresh_timestamp()
+        
+        # Get categories efficiently
+        categories = sheets_io.get_budget_categories()
+        if not categories:
+            return {"success": False, "message": "❌ לא נמצאו קטגוריות"}
+        
+        # Refresh all budgets efficiently
+        refresh_result = sheets_io.refresh_all_budgets()
+        
+        # Check if refresh was successful
+        if not refresh_result.get("success"):
+            error_msg = refresh_result.get("error", "שגיאה לא ידועה")
+            return {"success": False, "message": f"❌ {error_msg}"}
+        
+        # Get updated budget summary after refresh
+        try:
+            budget_summary = sheets_io.get_budget_summary()
+            if not budget_summary:
+                return {"success": False, "message": "❌ לא ניתן לקבל סיכום תקציב"}
+        except Exception as e:
+            print(f"Error getting budget summary after refresh: {e}")
+            return {"success": False, "message": f"❌ שגיאה בקבלת סיכום: {e}"}
+        
+        # Build response message
+        message_parts = [f"{user_info['emoji']} ✅ **רענון התקציב הושלם!**\n"]
+        
+        # Add budget information
+        for item in budget_summary:
+            category = item.get('קטגוריה', '')
+            if category:
+                spent = float(item.get('כמה יצא', 0)) if item.get('כמה יצא') else 0
+                remaining = float(item.get('כמה נשאר', 0)) if item.get('כמה נשאר') else 0
+                message_parts.append(f"💰 **{category}**: יצא {spent}₪, נשאר {remaining}₪")
+        
+        # Add refresh statistics
+        updated_count = refresh_result.get("updated_count", 0)
+        failed_categories = refresh_result.get("failed_categories", [])
+        
+        if failed_categories:
+            message_parts.append(f"\n⚠️ לא עודכנו: {', '.join(failed_categories)}")
+        
+        message_parts.append(f"\n📊 עודכנו {updated_count} קטגוריות")
+        
+        return {"success": True, "message": "\n".join(message_parts)}
+        
+    except Exception as e:
+        print(f"Error in smart refresh: {e}")
+        return {"success": False, "message": f"⚠️ שגיאה: {e}"}
+
 # ---------------------------------------------------------------------------
 # User Configuration & Smart Features
 # ---------------------------------------------------------------------------
 
 USER_PROFILES = {
-    keys.get("USER1_PHONE", "default"): {
-        "name": keys.get("USER1_NAME", "משתמש 1"),
+    config.get("USER1_PHONE", "default"): {
+        "name": config.get("USER1_NAME", "משתמש 1"),
         "emoji": "👨‍💼"
     },
-    keys.get("USER2_PHONE", "default"): {
-        "name": keys.get("USER2_NAME", "משתמש 2"), 
+    config.get("USER2_PHONE", "default"): {
+        "name": config.get("USER2_NAME", "משתמש 2"), 
         "emoji": "👩‍💼"
     }
 }
@@ -224,6 +330,10 @@ def handle_quick_command(command: str, sender: str) -> str:
     """Handle quick commands."""
     user_info = get_user_info(sender)
     
+    # Remove the duplicate command check since we now handle it at webhook level
+    # if is_duplicate_command(sender, command):  # <-- Remove this line
+    #     return f"{user_info['emoji']} הפקודה כבר מתבצעת, אנא המתינו..."  # <-- Remove this line
+    
     if command == "show_remaining_budgets":
         try:
             summary = sheets_io.get_budget_summary()
@@ -283,15 +393,15 @@ def handle_quick_command(command: str, sender: str) -> str:
 
     elif command == "refresh_budgets":
         try:
-            # Get current categories and recalculate totals
-            categories = sheets_io.get_budget_categories()
-            updated_count = 0
+            # Check if refresh is allowed (cooldown protection)
+            is_allowed, remaining_seconds, elapsed_seconds = is_refresh_allowed(sender)
+            if not is_allowed:
+                return f"{user_info['emoji']} ⏳ **רענון התקציב בוצע לאחרונה לפני {elapsed_seconds} שניות**\n⏱️ נסו שוב בעוד {remaining_seconds} שניות"
             
-            for category in categories:
-                sheets_io.update_budget_sheet(category)
-                updated_count += 1
+            # Perform smart refresh synchronously
+            result = perform_smart_refresh(sender, user_info)
+            return result["message"]
             
-            return f"🔄 **רענון הושלם!**\n✅ עודכנו {updated_count} קטגוריות בתקציב\n💰 כל הסכומים עכשיו מדויקים"
         except Exception as e:
             return f"⚠️ שגיאה ברענון: {e}"
 
@@ -509,9 +619,9 @@ def _handle_final_confirmation(sender: str, text: str, state: dict) -> str:
 def send_whatsapp_message(to: str, message: str) -> bool:
     """Send a WhatsApp message using Meta's API."""
     try:
-        url = f"https://graph.facebook.com/v17.0/{META_PHONE_NUMBER_ID}/messages"
+        url = f"https://graph.facebook.com/v17.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
         headers = {
-            'Authorization': f'Bearer {META_ACCESS_TOKEN}',
+            'Authorization': f'Bearer {WHATSAPP_TOKEN}',
             'Content-Type': 'application/json'
         }
         
@@ -552,24 +662,50 @@ def parse_meta_webhook(webhook_data: dict) -> dict:
         
         message = messages[0]
         
-        # Extract sender and message
+        # Extract sender, message, and message ID
         sender = message.get('from', '')
         message_type = message.get('type', '')
+        message_id = message.get('id', '')  # WhatsApp's unique message ID
         
         if message_type == 'text':
             body = message.get('text', {}).get('body', '')
         else:
-            body = ''
+            body = f"[{message_type}]"
+        
+        # Create content hash for deduplication
+        content_hash = hashlib.md5(f"{sender}:{body}:{int(time.time()//10)}".encode()).hexdigest()[:8]
         
         return {
             'sender': sender,
-            'body': body,
-            'message_type': message_type
+            'message': body,
+            'message_id': message_id,
+            'content_hash': content_hash,
+            'timestamp': time.time()
         }
-        
     except Exception as e:
         print(f"Error parsing webhook: {e}")
         return {}
+
+# Message deduplication with content hash
+RECENT_MESSAGES = {}  # {content_hash: timestamp}
+MESSAGE_CACHE_TTL = 60  # 1 minute
+
+def is_duplicate_message(content_hash: str) -> bool:
+    """Check if message is duplicate and clean old entries."""
+    current_time = time.time()
+    
+    # Clean old entries
+    expired_hashes = [h for h, t in RECENT_MESSAGES.items() if current_time - t > MESSAGE_CACHE_TTL]
+    for h in expired_hashes:
+        del RECENT_MESSAGES[h]
+    
+    # Check if current message is duplicate
+    if content_hash in RECENT_MESSAGES:
+        return True
+    
+    # Store current message
+    RECENT_MESSAGES[content_hash] = current_time
+    return False
 
 # ---------------------------------------------------------------------------
 # Main webhook route - Meta WhatsApp Business API
@@ -585,7 +721,7 @@ def webhook():
         token = request.args.get('hub.verify_token')
         challenge = request.args.get('hub.challenge')
         
-        if mode == 'subscribe' and token == META_VERIFY_TOKEN and challenge:
+        if mode == 'subscribe' and token == VERIFY_TOKEN and challenge:
             print("Webhook verified successfully!")
             return challenge, 200
         else:
@@ -600,136 +736,150 @@ def webhook():
             # Parse message from Meta's webhook
             message_data = parse_meta_webhook(webhook_data)
             
-            if not message_data or not message_data.get('sender') or not message_data.get('body'):
+            if not message_data or not message_data.get('sender') or not message_data.get('message'):
                 return "OK", 200
             
             sender = message_data['sender']
-            text = message_data['body'].strip()
+            text = message_data['message'].strip()
             
-            # Get user info for personalization
-            user_info = get_user_info(sender)
+            # **CRITICAL: Deduplication check at the very beginning**
+            # Use content hash for reliable deduplication
+            content_hash = message_data.get('content_hash')
             
-            # Handle quick commands first
-            if text in QUICK_COMMANDS:
-                reply = handle_quick_command(QUICK_COMMANDS[text], sender)
-                send_whatsapp_message(sender, reply)
+            if is_duplicate_message(content_hash):
+                print(f"DUPLICATE MESSAGE BLOCKED: {sender} - {text}")
                 return "OK", 200
             
-            # Handle natural language alternatives to quick commands
-            natural_commands = detect_natural_commands(text)
-            if natural_commands:
-                reply = handle_natural_commands(sender, natural_commands, text)
-                send_whatsapp_message(sender, reply)
-                return "OK", 200
+            print(f"PROCESSING: {sender} - {text}")
+            
+            # Process the message
+            response = process_message(sender, text)
+            
+            if response:
+                send_whatsapp_message(sender, response)
+            
+            return "OK", 200
+            
+        except Exception as e:
+            print(f"Error processing webhook: {e}")
+            return "Error", 500
 
-            # Handle context-aware responses
-            if any(word in text.lower() for word in ["תודה", "תודה רבה", "יפה", "מעולה", "כל הכבוד"]):
-                send_whatsapp_message(sender, f"{user_info['emoji']} בכיף! יש עוד הוצאות להזין?")
-                return "OK", 200
-            
-            if any(word in text.lower() for word in ["שלום", "היי", "הי", "מה נשמע", "מה המצב"]):
-                send_whatsapp_message(sender, f"שלום {user_info['name']}! {user_info['emoji']}\nאפשר לעזור לך עם התקציב?")
-                return "OK", 200
+    return "OK", 200
 
-            # First check if user is in budget setup flow
-            if sender in BUDGET_SETUP_STATES:
-                reply = handle_budget_setup_step(sender, text)
-                send_whatsapp_message(sender, reply)
-                return "OK", 200
+def process_message(sender: str, text: str) -> str:
+    """Process incoming message and return response."""
+    try:
+        # Check if services are initialized
+        if not sheets_io:
+            return "⚠️ שירות הגיליונות אינו זמין כרגע. אנא בדקו את ההגדרות."
+        
+        # Get user info for personalization
+        user_info = get_user_info(sender)
+        
+        # Handle quick commands first
+        if text in QUICK_COMMANDS:
+            return handle_quick_command(QUICK_COMMANDS[text], sender)
+        
+        # Handle natural language alternatives to quick commands
+        natural_commands = detect_natural_commands(text)
+        if natural_commands:
+            return handle_natural_commands(sender, natural_commands, text)
 
-            # Get categories from budget sheet
-            cats = sheets_io.get_budget_categories()
+        # Handle context-aware responses
+        if any(word in text.lower() for word in ["תודה", "תודה רבה", "יפה", "מעולה", "כל הכבוד"]):
+            return f"{user_info['emoji']} בכיף! יש עוד הוצאות להזין?"
+        
+        if any(word in text.lower() for word in ["שלום", "היי", "הי", "מה נשמע", "מה המצב"]):
+            return f"שלום {user_info['name']}! {user_info['emoji']}\nאפשר לעזור לך עם התקציב?"
+
+        # First check if user is in budget setup flow
+        if sender in BUDGET_SETUP_STATES:
+            return handle_budget_setup_step(sender, text)
+
+        # Get categories from budget sheet
+        cats = sheets_io.get_budget_categories()
+        
+        # Get GPT client
+        gpt_client = get_gpt()
+        if not gpt_client:
+            return "⚠️ שירות הבינה המלאכותית אינו זמין כרגע. אנא נסו שוב מאוחר יותר."
             
-            # Get GPT client
-            gpt_client = get_gpt()
-            if not gpt_client:
-                send_whatsapp_message(sender, "⚠️ שירות הבינה המלאכותית אינו זמין כרגע. אנא נסו שוב מאוחר יותר.")
-                return "OK", 200
+        msg_type = gpt_client.classify_message(text, cats)
+
+        # -------------------------------------------------------------------
+        # 1️⃣  Budget setup – NEW FEATURE
+        # -------------------------------------------------------------------
+        if msg_type == "budget_setup":
+            return start_budget_setup(sender)
+
+        # -------------------------------------------------------------------
+        # 2️⃣  Budget entry – NEW FLOW
+        # -------------------------------------------------------------------
+        if msg_type == "budget_entry":
+            try:
+                # Step 1: Get GPT to parse the expense
+                entry = gpt_client.infer_budget_entry(text, cats)
+                category = entry["קטגוריה"]
                 
-            msg_type = gpt_client.classify_message(text, cats)
+                # Step 2: Validate category exists in budget sheet
+                if category not in cats:
+                    return f"⚠️ הקטגוריה '{category}' אינה קיימת בגליון התקציב."
 
-            # -------------------------------------------------------------------
-            # 1️⃣  Budget setup – NEW FEATURE
-            # -------------------------------------------------------------------
-            if msg_type == "budget_setup":
-                reply = start_budget_setup(sender)
-                send_whatsapp_message(sender, reply)
-                return "OK", 200
+                # Step 3: Check for potential duplicates
+                duplicate_warning = check_potential_duplicate(entry)
+                
+                # Step 4: Process the expense (add to tracker + update budget)
+                result = sheets_io.process_expense(entry)
+                
+                if not result["success"]:
+                    return f"⚠️ שגיאה בעיבוד: {result['error']}"
+                
+                # Step 5: Get updated budget info and send confirmation
+                budget_info = result["budget_info"]
+                if budget_info:
+                    smart_warning = get_smart_budget_warning(
+                        category, 
+                        budget_info["כמה נשאר"], 
+                        budget_info["תקציב"]
+                    )
+                else:
+                    smart_warning = "לא נמצא מידע על יתרה"
 
-            # -------------------------------------------------------------------
-            # 2️⃣  Budget entry – NEW FLOW
-            # -------------------------------------------------------------------
-            if msg_type == "budget_entry":
-                try:
-                    # Step 1: Get GPT to parse the expense
-                    entry = gpt_client.infer_budget_entry(text, cats)
-                    category = entry["קטגוריה"]
-                    
-                    # Step 2: Validate category exists in budget sheet
-                    if category not in cats:
-                        send_whatsapp_message(sender, f"⚠️ הקטגוריה '{category}' אינה קיימת בגליון התקציב.")
-                        return "OK", 200
+                # Build personalized reply
+                reply = f"{user_info['emoji']} **נרשם בהצלחה!**\n"
+                reply += f"📝 {entry.get('פירוט', '')} - {entry.get('מחיר', '')}₪\n"
+                reply += f"💰 {smart_warning}\n"
+                
+                if duplicate_warning:
+                    reply += f"\n{duplicate_warning}"
+                
+                return reply
+                
+            except Exception as exc:
+                return f"⚠️ שגיאה בעיבוד: {exc}"
 
-                    # Step 3: Check for potential duplicates
-                    duplicate_warning = check_potential_duplicate(entry)
-                    
-                    # Step 4: Process the expense (add to tracker + update budget)
-                    result = sheets_io.process_expense(entry)
-                    
-                    if not result["success"]:
-                        send_whatsapp_message(sender, f"⚠️ שגיאה בעיבוד: {result['error']}")
-                        return "OK", 200
-                    
-                    # Step 5: Get updated budget info and send confirmation
-                    budget_info = result["budget_info"]
-                    if budget_info:
-                        smart_warning = get_smart_budget_warning(
-                            category, 
-                            budget_info["כמה נשאר"], 
-                            budget_info["תקציב"]
-                        )
-                    else:
-                        smart_warning = "לא נמצא מידע על יתרה"
+        # -------------------------------------------------------------------
+        # 3️⃣  Question – Enhanced with new architecture
+        # -------------------------------------------------------------------
+        if msg_type == "question":
+            try:
+                # Get data from both sheets
+                summary = sheets_io.get_budget_summary()
+                tx_rows = sheets_io.get_recent_transactions(limit=20)
+                
+                # Ask GPT
+                answer = gpt_client.answer_question(text, summary, tx_rows)
+                
+                # Personalized response
+                return f"{user_info['emoji']} {answer}"
+                
+            except Exception as exc:
+                return f"⚠️ לא הצלחתי לענות: {exc}"
 
-                    # Build personalized reply
-                    reply = f"{user_info['emoji']} **נרשם בהצלחה!**\n"
-                    reply += f"📝 {entry.get('פירוט', '')} - {entry.get('מחיר', '')}₪\n"
-                    reply += f"💰 {smart_warning}\n"
-                    
-                    if duplicate_warning:
-                        reply += f"\n{duplicate_warning}"
-                    
-                    send_whatsapp_message(sender, reply)
-                    
-                except Exception as exc:
-                    send_whatsapp_message(sender, f"⚠️ שגיאה בעיבוד: {exc}")
-
-                return "OK", 200
-
-            # -------------------------------------------------------------------
-            # 3️⃣  Question – Enhanced with new architecture
-            # -------------------------------------------------------------------
-            if msg_type == "question":
-                try:
-                    # Get data from both sheets
-                    summary = sheets_io.get_budget_summary()
-                    tx_rows = sheets_io.get_recent_transactions(limit=20)
-                    
-                    # Ask GPT
-                    answer = gpt_client.answer_question(text, summary, tx_rows)
-                    
-                    # Personalized response
-                    personalized_answer = f"{user_info['emoji']} {answer}"
-                    send_whatsapp_message(sender, personalized_answer)
-                    
-                except Exception as exc:
-                    send_whatsapp_message(sender, f"⚠️ לא הצלחתי לענות: {exc}")
-                return "OK", 200
-
-            # -------------------------------------------------------------------
-            # 4️⃣  Fallback
-            # -------------------------------------------------------------------
-            fallback_msg = f"""🤖 {user_info['name']}, לא הבנתי בדיוק מה רציתם.
+        # -------------------------------------------------------------------
+        # 4️⃣  Fallback
+        # -------------------------------------------------------------------
+        fallback_msg = f"""🤖 {user_info['name']}, לא הבנתי בדיוק מה רציתם.
 
 📝 **דוגמאות לרישום הוצאה:**
 • "קניתי לחם ב-12"
@@ -750,15 +900,12 @@ def webhook():
 • קטגוריות
 
 💡 נסו שוב או כתבו "עזרה" למדריך מלא!"""
-            
-            send_whatsapp_message(sender, fallback_msg)
-            return "OK", 200
-            
-        except Exception as e:
-            print(f"Error processing webhook: {e}")
-            return "OK", 200
-
-    return "OK", 200
+        
+        return fallback_msg
+        
+    except Exception as e:
+        print(f"Error processing message: {e}")
+        return "⚠️ שגיאה בעיבוד ההודעה. אנא נסו שוב."
 
 # ---------------------------------------------------------------------------
 # Legacy endpoint for backward compatibility

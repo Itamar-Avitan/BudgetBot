@@ -32,5 +32,5 @@ resources:
   memory_gb: 1        # 2x more memory (was 0.5)
   disk_size_gb: 10    # 2x more disk (was 5)
 
-# Timeout configuration for webhooks - using full version
-entrypoint: gunicorn -b :$PORT whatsapp:app --timeout 60 --workers 2 --worker-class sync --max-requests 1000 
+# Timeout configuration for webhooks - using single worker to prevent restart issues
+entrypoint: gunicorn -b :$PORT whatsapp:app --timeout 120 --workers 1 --worker-class sync --max-requests 1000 
