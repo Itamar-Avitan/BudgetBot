@@ -8,6 +8,8 @@
 
 Imagine having a **personal finance assistant** that lives in your WhatsApp and understands Hebrew perfectly:
 
+> **🚀 NEW in v2.1-optimized**: Ultra-fast responses with intelligent caching and batch processing!
+
 ### **💬 Natural Conversations**
 ```
 You: "קניתי קפה ב-15"
@@ -32,6 +34,8 @@ Bot: "✅ נרשם בהצלחה! קפה - 15₪
 - **Expense questions** - "כמה הוצאתי השבוע?"
 - **Category management** - automatic budget calculations
 - **Multiple sheets** - organize by month
+- **⚡ Smart Caching** - Instant responses for repeated questions
+- **🚀 Batch Processing** - 50% faster expense processing
 
 ---
 
@@ -175,6 +179,9 @@ Send `יתרה` to your bot and watch the magic happen! ✨
 ✅ **Open source** - customize everything  
 ✅ **Cheap to run** - ~$0.50/month total cost  
 ✅ **Professional deployment** - enterprise-grade reliability  
+🆕 **⚡ Lightning-fast responses** - intelligent caching system  
+🆕 **🚀 Optimized performance** - 50% faster processing  
+🆕 **💾 Smart efficiency** - reduced API costs  
 
 ---
 

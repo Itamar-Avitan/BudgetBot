@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from flask import Flask, request
 from sheets_IO import SheetsIO, Sheets_analyzer
-from GPT_API import GPT_API
+from optimized_gpt import OptimizedGPT_API as GPT_API
 
 # ---------------------------------------------------------------------------
 # Load configuration - Environment variables for production or keys.json for local
@@ -813,28 +813,42 @@ def process_message(sender: str, text: str) -> str:
             return start_budget_setup(sender)
 
         # -------------------------------------------------------------------
-        # 2️⃣  Budget entry – NEW FLOW
+        # 2️⃣  Budget entry – OPTIMIZED BATCH PROCESSING
         # -------------------------------------------------------------------
         if msg_type == "budget_entry":
             try:
-                # Step 1: Get GPT to parse the expense
-                entry = gpt_client.infer_budget_entry(text, cats)
-                category = entry["קטגוריה"]
+                # 🚀 OPTIMIZATION: Use batch processing instead of separate classify+parse calls
+                start_time = time.time()
+                batch_result = gpt_client.process_message_batch(text, cats)
+                processing_time = (time.time() - start_time) * 1000
                 
-                # Step 2: Validate category exists in budget sheet
+                # Validate the batch result
+                if not batch_result or batch_result.get("message_type") != "budget_entry":
+                    return f"⚠️ לא הצלחתי לזהות את ההוצאה. נסו שוב בפורמט: 'קניתי פלאפל ב-18'"
+                
+                # Extract expense data from batch result
+                expense_data = batch_result.get("expense_data", {})
+                confidence = batch_result.get("confidence", 0)
+                
+                if not expense_data or not expense_data.get("קטגוריה"):
+                    return f"⚠️ לא הצלחתי לזהות את פרטי ההוצאה. נסו שוב בפורמט: 'קניתי פלאפל ב-18'"
+                
+                category = expense_data["קטגוריה"]
+                
+                # Step 1: Validate category exists in budget sheet
                 if category not in cats:
                     return f"⚠️ הקטגוריה '{category}' אינה קיימת בגליון התקציב."
 
-                # Step 3: Check for potential duplicates
-                duplicate_warning = check_potential_duplicate(entry)
+                # Step 2: Check for potential duplicates
+                duplicate_warning = check_potential_duplicate(expense_data)
                 
-                # Step 4: Process the expense (add to tracker + update budget)
-                result = sheets_io.process_expense(entry)
+                # Step 3: Process the expense (add to tracker + update budget)
+                result = sheets_io.process_expense(expense_data)
                 
                 if not result["success"]:
                     return f"⚠️ שגיאה בעיבוד: {result['error']}"
                 
-                # Step 5: Get updated budget info and send confirmation
+                # Step 4: Get updated budget info and send confirmation
                 budget_info = result["budget_info"]
                 if budget_info:
                     smart_warning = get_smart_budget_warning(
@@ -845,13 +859,21 @@ def process_message(sender: str, text: str) -> str:
                 else:
                     smart_warning = "לא נמצא מידע על יתרה"
 
-                # Build personalized reply
+                # Build personalized reply with performance info
                 reply = f"{user_info['emoji']} **נרשם בהצלחה!**\n"
-                reply += f"📝 {entry.get('פירוט', '')} - {entry.get('מחיר', '')}₪\n"
+                reply += f"📝 {expense_data.get('פירוט', '')} - {expense_data.get('מחיר', '')}₪\n"
                 reply += f"💰 {smart_warning}\n"
+                
+                # Add confidence indicator if low
+                if confidence < 0.8:
+                    reply += f"🤔 דחיפות: {confidence:.1f} (אולי בדקו שהפרטים נכונים)\n"
                 
                 if duplicate_warning:
                     reply += f"\n{duplicate_warning}"
+                
+                # Add performance indicator for very fast processing
+                if processing_time < 1000:  # Less than 1 second
+                    reply += f"\n⚡ עובד מהר היום! ({processing_time:.0f}ms)"
                 
                 return reply
                 
@@ -859,7 +881,7 @@ def process_message(sender: str, text: str) -> str:
                 return f"⚠️ שגיאה בעיבוד: {exc}"
 
         # -------------------------------------------------------------------
-        # 3️⃣  Question – Enhanced with new architecture
+        # 3️⃣  Question – OPTIMIZED WITH CACHING
         # -------------------------------------------------------------------
         if msg_type == "question":
             try:
@@ -867,11 +889,28 @@ def process_message(sender: str, text: str) -> str:
                 summary = sheets_io.get_budget_summary()
                 tx_rows = sheets_io.get_recent_transactions(limit=20)
                 
-                # Ask GPT
-                answer = gpt_client.answer_question(text, summary, tx_rows)
+                # 🚀 OPTIMIZATION: Use cached question answering
+                start_time = time.time()
+                cached_result = gpt_client.answer_question_cached(text, summary, tx_rows)
+                processing_time = (time.time() - start_time) * 1000
                 
-                # Personalized response
-                return f"{user_info['emoji']} {answer}"
+                answer = cached_result["answer"]
+                was_cached = cached_result["cached"]
+                cache_age = cached_result.get("cache_age", 0)
+                
+                # Build personalized response with cache info
+                reply = f"{user_info['emoji']} {answer}"
+                
+                # Add cache performance indicators
+                if was_cached:
+                    if cache_age < 60:  # Less than 1 minute
+                        reply += f"\n⚡ תשובה מהירה! (מטמון {cache_age}s)"
+                    else:
+                        reply += f"\n💾 תשובה מהירה! (מטמון {cache_age//60}m)"
+                elif processing_time < 1000:  # Less than 1 second
+                    reply += f"\n🚀 עיבוד מהיר! ({processing_time:.0f}ms)"
+                
+                return reply
                 
             except Exception as exc:
                 return f"⚠️ לא הצלחתי לענות: {exc}"
@@ -934,24 +973,51 @@ def health_check():
 
 @app.route("/health")
 def health_detailed():
-    """Detailed health check endpoint."""
+    """Detailed health check endpoint with optimization statistics."""
     try:
         # Test Google Sheets connection
-        categories = sheets_io.get_budget_categories()
+        categories = sheets_io.get_budget_categories() if sheets_io else []
         sheets_healthy = len(categories) > 0
         
-        # Test GPT API (basic test)
-        gpt_healthy = True  # We'll assume healthy unless we get an error
+        # Test GPT API and get cache statistics
+        gpt_healthy = True
+        cache_stats = {"hits": 0, "misses": 0, "hit_rate": 0.0, "cache_size": 0}
+        
+        gpt_client = get_gpt()
+        if gpt_client and hasattr(gpt_client, 'get_cache_stats'):
+            try:
+                cache_stats = gpt_client.get_cache_stats()
+                gpt_healthy = True
+            except Exception:
+                gpt_healthy = False
+        
+        # Calculate overall performance metrics (handle different key names)
+        hits = cache_stats.get("hits", cache_stats.get("cache_hits", 0))
+        misses = cache_stats.get("misses", cache_stats.get("cache_misses", 0))
+        hit_rate = cache_stats.get("hit_rate", 0.0)
+        
+        total_requests = hits + misses
+        performance_score = "excellent" if hit_rate > 0.3 else "good" if hit_rate > 0.1 else "normal"
         
         health_status = {
             "status": "healthy" if sheets_healthy and gpt_healthy else "unhealthy",
             "service": "WhatsApp Budget Bot",
-            "version": "2.0",
+            "version": "2.1-optimized",  # Updated version to indicate optimizations
             "timestamp": datetime.now().isoformat(),
             "components": {
                 "google_sheets": "healthy" if sheets_healthy else "unhealthy",
                 "gpt_api": "healthy" if gpt_healthy else "unhealthy",
                 "categories_count": len(categories) if sheets_healthy else 0
+            },
+            "performance": {
+                "cache_stats": cache_stats,
+                "total_requests": total_requests,
+                "performance_score": performance_score,
+                "optimizations": {
+                    "response_caching": "enabled",
+                    "batch_processing": "enabled",
+                    "smart_deduplication": "enabled"
+                }
             }
         }
         
@@ -961,7 +1027,7 @@ def health_detailed():
         return {
             "status": "unhealthy",
             "service": "WhatsApp Budget Bot",
-            "version": "2.0",
+            "version": "2.1-optimized",
             "timestamp": datetime.now().isoformat(),
             "error": str(e)
         }, 503
